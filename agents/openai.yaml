@@ -1,0 +1,6 @@
+interface:
+  display_name: "物理实验工作流"
+  short_description: "从预习、原始记录和个人判断到简练完整的物理实验报告，交付 PDF 并保留源稿"
+  default_prompt: "使用 $physics-lab-workflow 读取我的实验材料，先核算并询问必要的个人观察和判断，再整理符合课程要求的 PDF 报告。"
+policy:
+  allow_implicit_invocation: true
