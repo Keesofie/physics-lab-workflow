@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Render a supported Markdown subset to an A4 physics-report PDF.
 
-No network calls. Does not modify input, and refuses existing output files.
+No network calls. Accepts in-memory text or stdin, writes only a PDF, and
+refuses existing output files. Markdown files remain supported as input.
 MathText is imported only if equations occur. See references/pdf-and-archive.md.
 """
 from __future__ import annotations
@@ -271,7 +272,7 @@ def make_styles():
     }
 
 
-def story_from(source: str, source_path: Path, math: MathRenderer):
+def story_from(source: str, base_dir: Path, math: MathRenderer):
     styles = make_styles()
     story = []
     for kind, value in blocks(source):
@@ -297,7 +298,7 @@ def story_from(source: str, source_path: Path, math: MathRenderer):
             caption, location = value
             if re.match(r"^[A-Za-z]+://", location):
                 raise ReportError("图片只支持本地文件，不自动下载外部链接")
-            path = (source_path.parent / location).resolve()
+            path = (base_dir / location).resolve()
             if not path.is_file():
                 raise ReportError(f"图片不存在: {path}")
             try:
@@ -347,21 +348,34 @@ def render(input_path: Path, output_path: Path, font=None, font_index=0):
     input_path, output_path = input_path.resolve(), output_path.resolve()
     if input_path == output_path:
         raise ReportError("输出不能与源稿相同")
+    source = input_path.read_text(encoding="utf-8-sig")
+    return render_text(source, output_path, base_dir=input_path.parent,
+                       font=font, font_index=font_index, title=input_path.stem)
+
+
+def render_text(source: str, output_path: Path, *, base_dir=None,
+                font=None, font_index=0, title=None):
+    """Render from memory without creating a source file or persistent assets.
+
+    Image paths resolve against base_dir (cwd by default). Only the requested
+    PDF is written outside the automatically cleaned temporary directory.
+    """
+    output_path = Path(output_path).resolve()
+    base_dir = Path(base_dir).resolve() if base_dir is not None else Path.cwd()
     if output_path.exists():
         raise ReportError(f"输出已存在，拒绝覆盖: {output_path}")
     if output_path.suffix.lower() != ".pdf":
         raise ReportError("输出文件必须为 .pdf")
-    source = input_path.read_text(encoding="utf-8-sig")
     register_font(choose_font(font), font_index)
     # Build fully in memory; reserve destination only once after success.
     with tempfile.TemporaryDirectory(prefix="physics-lab-render-") as directory:
         math = MathRenderer(Path(directory))
-        story = story_from(source, input_path, math)
+        story = story_from(source, base_dir, math)
         memory = io.BytesIO()
         doc = BaseDocTemplate(memory, pagesize=(PAGE_WIDTH, PAGE_HEIGHT),
                               leftMargin=MARGIN, rightMargin=MARGIN,
                               topMargin=MARGIN, bottomMargin=MARGIN,
-                              title=input_path.stem, author="", pageCompression=1)
+                              title=title or output_path.stem, author="", pageCompression=1)
         frame = Frame(MARGIN, MARGIN, BODY_WIDTH, BODY_HEIGHT,
                       leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
         doc.addPageTemplates(PageTemplate(id="report", frames=[frame], onPage=footer))
@@ -374,13 +388,21 @@ def render(input_path: Path, output_path: Path, font=None, font_index=0):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input", type=Path, help="UTF-8 Markdown 源稿")
+    parser.add_argument("input", help="已有的 UTF-8 Markdown 输入文件，或 - 从标准输入读取")
     parser.add_argument("--output", required=True, type=Path, help="不存在的 PDF 输出路径")
+    parser.add_argument("--base-dir", type=Path, help="标准输入模式下相对图片路径的基目录，默认当前目录")
     parser.add_argument("--font", help="中文 TTF/TTC 字体文件")
     parser.add_argument("--font-index", type=int, default=0, help="TTC 子字体序号，默认 0")
     args = parser.parse_args()
     try:
-        path = render(args.input, args.output, args.font, args.font_index)
+        if args.input == "-":
+            source = sys.stdin.buffer.read().decode("utf-8-sig")
+            path = render_text(source, args.output, base_dir=args.base_dir,
+                               font=args.font, font_index=args.font_index)
+        else:
+            if args.base_dir is not None:
+                raise ReportError("--base-dir 仅用于标准输入模式；文件模式的图片相对于输入文件")
+            path = render(Path(args.input), args.output, args.font, args.font_index)
     except Exception as exc:
         print(f"未生成 PDF: {exc}", file=sys.stderr)
         return 1

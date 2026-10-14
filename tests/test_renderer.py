@@ -2,8 +2,10 @@
 import importlib.util
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from pypdf import PdfReader
 
@@ -55,6 +57,41 @@ class RendererTests(unittest.TestCase):
             renderer.render(self.source, self.pdf)
         self.assertEqual(self.pdf.read_bytes(), b"existing-output")
 
+    def test_memory_input_leaves_only_pdf_and_preserves_blank_fields(self):
+        text = "# 合成实验报告\n\n未提供的信息已留空，需本人补全。\n\n姓名：________\n\n## 实验讨论\n\n________\n\n| 序号 | 读数 |\n| --- | --- |\n| 1 | |\n"
+        renderer.render_text(text, self.pdf, base_dir=self.root)
+        self.assertEqual({p.name for p in self.root.iterdir()}, {self.pdf.name})
+        extracted = PdfReader(self.pdf).pages[0].extract_text()
+        self.assertIn("姓名：________", extracted)
+        self.assertIn("实验讨论", extracted)
+        self.assertNotIn("未知", extracted)
+        self.assertNotIn("未发现异常", extracted)
+
+    def test_stdin_cli_reads_utf8_and_only_creates_pdf(self):
+        text = "# 合成标准输入测试\n\n现场现象：________\n"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "-", "--output", str(self.pdf)],
+            input=text.encode("utf-8"), capture_output=True, cwd=str(self.root),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+        self.assertEqual({p.name for p in self.root.iterdir()}, {self.pdf.name})
+        self.assertIn("现场现象：________", PdfReader(self.pdf).pages[0].extract_text())
+
+    def test_memory_images_resolve_against_base_dir(self):
+        from PIL import Image
+        assets = self.root / "temporary-assets"
+        assets.mkdir()
+        Image.new("RGB", (100, 50), "white").save(assets / "图.png")
+        renderer.render_text("# 合成图片测试\n\n![合成图片](图.png)", self.pdf, base_dir=assets)
+        self.assertIn("/XObject", PdfReader(self.pdf).pages[0]["/Resources"])
+        self.assertEqual({p.name for p in self.root.iterdir()}, {"temporary-assets", self.pdf.name})
+
+    def test_memory_mode_does_not_overwrite_existing_output(self):
+        self.pdf.write_bytes(b"existing-output")
+        with self.assertRaisesRegex(renderer.ReportError, "拒绝覆盖"):
+            renderer.render_text("# 合成测试", self.pdf)
+        self.assertEqual(self.pdf.read_bytes(), b"existing-output")
+
     def test_invalid_inputs_never_leave_a_partial_pdf(self):
         cases = [
             "# 模拟\n\n$$\nx^2", "# 模拟\n\n公式 $x",
@@ -76,10 +113,10 @@ class RendererTests(unittest.TestCase):
         self.assertFalse(self.pdf.exists())
 
     def test_math_dependency_failure_is_explicit(self):
-        if HAS_MATH:
-            self.skipTest("MathText 已安装，单独验证实际公式")
-        with self.assertRaisesRegex(renderer.ReportError, "缺少 matplotlib"):
-            self.render("# 模拟\n\n$$\nx^2\n$$")
+        # Exercise missing dependency even on CI where Matplotlib is installed.
+        with patch.dict(sys.modules, {"matplotlib": None}):
+            with self.assertRaisesRegex(renderer.ReportError, "缺少 matplotlib"):
+                self.render("# 模拟\n\n$$\nx^2\n$$")
         self.assertFalse(self.pdf.exists())
 
     @unittest.skipUnless(HAS_MATH, "当前环境无 Matplotlib，尚待公式渲染验收")
